@@ -1,0 +1,28 @@
+# zlib.recipe
+# Receita para compilar e instalar o zlib
+
+# Informações do pacote
+PACKAGE_NAME="zlib"
+VERSION="1.2.13"
+DEPENDENCIES=() # Nenhuma dependência para este pacote
+
+# URLs e arquivos
+SOURCE_URL="https://www.zlib.net/zlib-${VERSION}.tar.gz"
+PATCH_FILES=() # Nenhuma patch para este pacote
+
+# Comandos de compilação
+# As aspas duplas são importantes para comandos com espaços
+BUILD_COMMANDS=(
+  "./configure"
+  "make"
+)
+
+# Comandos de instalação (usando o fakeroot)
+INSTALL_COMMANDS=(
+  "make install DESTDIR=\$FAKEROOT_DIR"
+)
+
+# Comandos de teste (opcional)
+TEST_COMMANDS=(
+  "make check"
+)
