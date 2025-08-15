@@ -1,0 +1,214 @@
+#!/usr/bin/env sh
+
+# Gerenciador de Pacotes Simples - LFS
+# Autor: Seu Nome
+# Licença: MIT
+# Baseado na filosofia Linux From Scratch
+
+# --- Configurações Iniciais e Cores ---
+# ATENÇÃO: Adicione a pasta 'pack' ao seu PATH para usar o comando 'pack'
+# Exemplo: export PATH="$HOME/pack:$PATH"
+
+export PATH="$HOME/pack/bin:$PATH" # Adiciona um diretório bin para o script
+
+# Diretórios
+PACK_DIR="$HOME/pack"
+RECIPES_DIR="$PACK_DIR/recipes"
+SOURCES_DIR="$PACK_DIR/sources"
+BUILD_DIR="$PACK_DIR/build"
+PKG_DIR="$PACK_DIR/pkg"
+DB_DIR="$PACK_DIR/db"
+DB_INSTALLED_DIR="$DB_DIR/installed"
+
+# Cores
+_RST='\033[0m'    # Reset
+_RED='\033[0;31m'   # Erro
+_GRN='\033[0;32m'   # Sucesso
+_YLW='\033[0;33m'   # Aviso
+_BLU='\033[0;34m'   # Info
+_PUR='\033[0;35m'   # Ação
+_CYN='\033[0;36m'   # Destaque
+
+# --- Funções Auxiliares ---
+
+color_echo() {
+  printf '%b%s%b\n' "$1" "$2" "$_RST"
+}
+
+check_dirs() {
+  for dir in "$RECIPES_DIR" "$SOURCES_DIR" "$BUILD_DIR" "$PKG_DIR" "$DB_DIR" "$DB_INSTALLED_DIR"; do
+    if [ ! -d "$dir" ]; then
+      mkdir -p "$dir"
+    fi
+  done
+}
+
+# --- Funções do Gerenciador ---
+
+# -b: Compila um pacote
+build_package() {
+  PACKAGE_NAME="$1"
+  RECIPE_FILE="$RECIPES_DIR/${PACKAGE_NAME}.recipe"
+
+  if [ ! -f "$RECIPE_FILE" ]; then
+    color_echo "$_RED" "Erro: Receita para '$PACKAGE_NAME' não encontrada."
+    exit 1
+  fi
+
+  . "$RECIPE_FILE"
+
+  color_echo "$_BLU" "Resolvendo dependências para '$PACKAGE_NAME'..."
+  for dep in "${DEPENDENCIES[@]}"; do
+    if [ ! -f "$DB_INSTALLED_DIR/$dep" ]; then
+      color_echo "$_YLW" "Dependência '$dep' não encontrada. Compilando e instalando agora."
+      build_package "$dep"
+      install_package_internal "$dep"
+    fi
+  done
+
+  color_echo "$_PUR" "Baixando e descompactando fonte..."
+  SRC_FILE="$SOURCES_DIR/$(basename "$SOURCE_URL")"
+  if [ ! -f "$SRC_FILE" ]; then
+    if echo "$SOURCE_URL" | grep -q "github.com"; then
+      git clone "$SOURCE_URL" "$BUILD_DIR/$PACKAGE_NAME-$VERSION"
+    else
+      wget -c "$SOURCE_URL" -O "$SRC_FILE"
+      tar -xf "$SRC_FILE" -C "$BUILD_DIR"
+    fi
+  fi
+  
+  cd "$BUILD_DIR/$PACKAGE_NAME-$VERSION" || exit 1
+
+  color_echo "$_PUR" "Aplicando patches (se houver)..."
+  for patch_file in "${PATCH_FILES[@]}"; do
+    patch -p1 < "$PACK_DIR/patches/$patch_file"
+  done
+
+  color_echo "$_PUR" "Iniciando compilação..."
+  for cmd in "${BUILD_COMMANDS[@]}"; do
+    eval "$cmd"
+  done
+
+  color_echo "$_GRN" "Compilação de '$PACKAGE_NAME' concluída."
+  cd "$PACK_DIR"
+}
+
+# -i: Instala um pacote compilado
+install_package() {
+  PACKAGE_NAME="$1"
+  if [ ! -d "$BUILD_DIR/$PACKAGE_NAME-$VERSION" ]; then
+    color_echo "$_YLW" "Pacote não compilado. Compilando agora..."
+    build_package "$PACKAGE_NAME"
+  fi
+  install_package_internal "$PACKAGE_NAME"
+}
+
+install_package_internal() {
+  PACKAGE_NAME="$1"
+  RECIPE_FILE="$RECIPES_DIR/${PACKAGE_NAME}.recipe"
+  . "$RECIPE_FILE"
+
+  color_echo "$_BLU" "Iniciando instalação de '$PACKAGE_NAME'..."
+
+  # O conceito de fakeroot
+  FAKEROOT_DIR="$BUILD_DIR/fakeroot-for-${PACKAGE_NAME}"
+  mkdir -p "$FAKEROOT_DIR"
+
+  cd "$BUILD_DIR/$PACKAGE_NAME-$VERSION" || exit 1
+  for cmd in "${INSTALL_COMMANDS[@]}"; do
+    eval "$cmd"
+  done
+  cd "$PACK_DIR"
+  
+  color_echo "$_PUR" "Copiando arquivos para o sistema e gerando lista..."
+  FILE_LIST="$DB_INSTALLED_DIR/$PACKAGE_NAME.files"
+  find "$FAKEROOT_DIR" -type f -exec sed -i "s|$FAKEROOT_DIR||g" {} +
+  rsync -av "$FAKEROOT_DIR/" /
+  find "$FAKEROOT_DIR" -type f -print0 > "$FILE_LIST"
+
+  color_echo "$_GRN" "Instalação de '$PACKAGE_NAME' concluída."
+}
+
+# -r: Remove um pacote
+remove_package() {
+  PACKAGE_NAME="$1"
+  FILE_LIST="$DB_INSTALLED_DIR/$PACKAGE_NAME.files"
+
+  if [ ! -f "$FILE_LIST" ]; then
+    color_echo "$_RED" "Erro: Pacote '$PACKAGE_NAME' não está instalado."
+    exit 1
+  fi
+
+  color_echo "$_BLU" "Removendo '$PACKAGE_NAME' e seus arquivos..."
+  while read -r file; do
+    rm -v -- "/$file"
+  done < "$FILE_LIST"
+
+  rm "$FILE_LIST"
+  color_echo "$_GRN" "Remoção de '$PACKAGE_NAME' concluída."
+}
+
+# -s: Procura por um pacote
+search_package() {
+  local term="$1"
+  color_echo "$_CYN" "--- Pacotes Instalados ---"
+  find "$DB_INSTALLED_DIR" -name "*.files" -exec basename {} .files \; | grep -i "$term"
+
+  color_echo "$_CYN" "--- Receitas Disponíveis ---"
+  find "$RECIPES_DIR" -name "*.recipe" -exec basename {} .recipe \; | grep -i "$term"
+}
+
+# -c: Cria um pacote comprimido
+create_archive() {
+  PACKAGE_NAME="$1"
+  RECIPE_FILE="$RECIPES_DIR/${PACKAGE_NAME}.recipe"
+  
+  if [ ! -f "$RECIPE_FILE" ]; then
+    color_echo "$_RED" "Erro: Receita para '$PACKAGE_NAME' não encontrada."
+    exit 1
+  fi
+
+  . "$RECIPE_FILE"
+  
+  FAKEROOT_DIR="$BUILD_DIR/fakeroot-for-${PACKAGE_NAME}"
+  if [ ! -d "$FAKEROOT_DIR" ]; then
+      color_echo "$_YLW" "Pacote não compilado/instalado. Compilando e instalando primeiro..."
+      build_package "$PACKAGE_NAME"
+      install_package_internal "$PACKAGE_NAME"
+  fi
+  
+  color_echo "$_PUR" "Criando arquivo de pacote para '$PACKAGE_NAME'..."
+  tar -czf "$PKG_DIR/${PACKAGE_NAME}-${VERSION}.pkg.tar.gz" -C "$FAKEROOT_DIR" .
+  color_echo "$_GRN" "Arquivo de pacote criado em '$PKG_DIR'."
+}
+
+# --- Lógica da Linha de Comando ---
+
+check_dirs
+
+case "$1" in
+  -b|--build)
+    build_package "$2"
+    ;;
+  -i|--install)
+    install_package "$2"
+    ;;
+  -r|--remove)
+    remove_package "$2"
+    ;;
+  -s|--search)
+    search_package "$2"
+    ;;
+  -c|--create)
+    create_archive "$2"
+    ;;
+  *)
+    color_echo "$_CYN" "Uso: $0 <opção> <pacote>"
+    color_echo "$_YLW" "Opções:"
+    color_echo "$_GRN" "  -b, --build   <pacote>  Compila um pacote."
+    color_echo "$_GRN" "  -i, --install <pacote>  Compila e instala um pacote."
+    color_echo "$_GRN" "  -r, --remove  <pacote>  Remove um pacote instalado."
+    color_echo "$_GRN" "  -s, --search  <termo>   Procura por um pacote."
+    color_echo "$_GRN" "  -c, --create  <pacote>  Cria um pacote comprimido."
+    ;;
+esac
